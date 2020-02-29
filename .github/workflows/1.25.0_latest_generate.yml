@@ -1,0 +1,83 @@
+name: Follow upstream [version:1.25.0_latest]
+
+on:
+  push:
+    tags:
+    - pushed-ci-config-*-arm
+    - '!pushed-ci-config-0.*-arm'
+    - '!pushed-ci-config-1.[0-9].*-arm'
+    - '!pushed-ci-config-1.1[0-9].*-arm'
+    - '!pushed-ci-config-1.2[0-4].*-arm'
+
+jobs:
+  generate:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Configure git
+      run: |
+        set -eux
+        git config --global user.email "bot@example.com"
+        git config --global user.name "github-actions"
+
+    - name: Extract names
+      id: extract
+      run: |
+        set -eu
+
+        OWNER="$(echo ${{ github.repository }} | sed -r 's/(.*)\/.*/\1/')"
+        REPO="$(echo ${{ github.repository }} | sed -r 's/.*\/(.*)/\1/')"
+        BRANCH="$(echo ${{ github.ref }} | sed -r 's/.*pushed-ci-config-(.*)-[a-z0-9]*-arm.*/\1/')"
+        GENERATOR_NAME="generate-arm-dockerfile"
+        GENERATOR_VERSION="$(echo '${{ github.workflow }}'| sed -r 's/.*\[version:(.*)\].*/\1/')"
+        GENERATOR_SCRIPT_SRC="$REPO/$GENERATOR_VERSION/pull"
+
+        echo "##[set-output name=owner;]$OWNER"
+        echo "##[set-output name=repo;]$REPO"
+        echo "##[set-output name=branch;]$BRANCH"
+        echo "##[set-output name=generator-name;]$GENERATOR_NAME"
+        echo "##[set-output name=generator-repo;]$OWNER/$GENERATOR_NAME"
+        echo "##[set-output name=generator-version;]$GENERATOR_VERSION"
+        echo "##[set-output name=generator-script-src;]$GENERATOR_SCRIPT_SRC"
+
+    - name: Checkout ${{ github.repository }}
+      uses: actions/checkout@v2
+      with:
+        persist-credentials: 'true'
+        ref: ${{ steps.extract.outputs.branch }}
+        token: ${{ secrets.GITHUB_PAT }}
+        fetch-depth: 2
+
+    - name: Checkout ${{ steps.extract.outputs.generator-repo }}
+      uses: actions/checkout@v2
+      with:
+        persist-credentials: 'false'
+        repository: ${{ steps.extract.outputs.generator-repo }}
+        path: .${{ steps.extract.outputs.generator-name }}
+
+    - name: Copy scripts
+      run: |
+        set -eux
+        cp -r .${{ steps.extract.outputs.generator-name }}/${{ steps.extract.outputs.generator-script-src }}/* .
+
+    - name: Follow upstream
+      run: ./follow-upstream.sh
+
+    - name: Clean up files used to follow upstream
+      run: |
+        set -eux
+        ls -1 .${{ steps.extract.outputs.generator-name }}/${{ steps.extract.outputs.generator-script-src }} | xargs rm -rf
+        rm -rf .${{ steps.extract.outputs.generator-name }}
+
+    - name: Commit
+      id: commit
+      run: |
+        set -eux
+        git add .
+        git commit --allow-empty -m "[Auto] Follow upstream"
+
+    - name: Push
+      run: |
+        set -eux
+        git push -f origin "$(git symbolic-ref --short HEAD)"

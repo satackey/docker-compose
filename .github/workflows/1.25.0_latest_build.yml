@@ -1,0 +1,149 @@
+name: Push to Docker Hub
+
+on:
+  push:
+    branches:
+    - '*-arm'
+
+jobs:
+  build:
+
+    # https://github.community/t5/GitHub-Actions/Skip-workflow-if-commit-is-tagged/td-p/35695
+    if: contains(github.event.head_commit.message, '[Auto] Follow upstream')
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        arch:
+        - linux/amd64
+        - linux/arm/v7
+        - linux/arm64
+
+    steps:
+    - name: Extract names
+      id: extract
+      run: |
+        set -eu
+        BRANCH="$(echo ${{ github.ref }} | sed -r 's/refs\/heads\/(.*)/\1/')"
+        PARENT_BRANCH="$(echo $BRANCH | sed -r 's/(.*)-arm/\1/')"
+        ARCH_SNAKECASE="$(echo '${{ matrix.arch }}' | sed -r 's/\//_/g')"
+
+        DOCKER_TAG="$PARENT_BRANCH-$ARCH_SNAKECASE"
+        DOCKER_CACHE_REPO="${{ github.repository }}"
+        DOKCER_CACHE_TAG="$PARENT_BRANCH-$ARCH_SNAKECASE"
+        DOCKER_CACHE_IMAGE="$DOCKER_CACHE_REPO:$DOKCER_CACHE_TAG"
+        # 安定版をlatestとした方が良さそう
+        # if [ $PARENT_BRANCH = "master" ];then
+        #   DOCKER_TAG=latest
+        # fi
+
+        DOCKER_CACHE_PATH=${PWD}/.docker-build-cache
+
+        UNIXTIME="$(date +%s)"
+
+        echo "##[set-output name=branch;]$BRANCH"
+        echo "##[set-output name=arch-snakecase;]$ARCH_SNAKECASE"
+        echo "##[set-output name=docker-tag;]$DOCKER_TAG"
+        echo "##[set-output name=docker-cache-repo;]$DOCKER_CACHE_REPO"
+        echo "##[set-output name=docker-cache-tag;]$DOKCER_CACHE_TAG"
+        echo "##[set-output name=docker-cache-image;]$DOCKER_CACHE_IMAGE"
+        # echo "##[set-output name=docker-cache-repotag;]docker.pkg.github.com/${{ github.repository }}/$BRANCH:$ARCH_SNAKECASE"
+        echo "##[set-output name=docker-cache-path;]$DOCKER_CACHE_PATH"
+        echo "##[set-output name=unixtime;]$UNIXTIME"
+
+    - name: Set up Docker Buildx
+      uses: crazy-max/ghaction-docker-buildx@v1
+      with:
+        version: latest
+
+    - uses: actions/checkout@v2
+
+    - name: Login to Docker Hub
+      run: |
+        set -eux
+        docker login -u satackey -p ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Restore Docker build cache
+      uses: actions/cache@v1
+      with:
+        path: ${{ steps.extract.outputs.docker-cache-path }}
+        key: docker-buildx-${{ steps.extract.outputs.arch-snakecase }}-testing01-${{ steps.extract.outputs.unixtime }}-${{ github.sha }}
+        restore-keys: |
+          docker-buildx-${{ steps.extract.outputs.arch-snakecase }}-testing01-
+          docker-buildx-${{ steps.extract.outputs.arch-snakecase }}-
+        # unixtime をうまく使って 最新のキャッシュを取得したい
+
+    - name: Build and push Docker image
+      run: |
+        set -eux
+
+        DOCKER_ARG_CACHE_FROM=""
+        if [ -e ${{ steps.extract.outputs.docker-cache-path }}/index.json ];then
+          DOCKER_ARG_CACHE_FROM="--cache-from type=local,src=${{ steps.extract.outputs.docker-cache-path }}"
+        fi
+
+        docker buildx build \
+          --platform ${{ matrix.arch }} \
+          --output "type=image,push=true" \
+          --file Dockerfile.${{ steps.extract.outputs.arch-snakecase }} \
+          $DOCKER_ARG_CACHE_FROM \
+          --cache-to type=local,mode=max,dest=${{ steps.extract.outputs.docker-cache-path }} \
+          -t ${{ steps.extract.outputs.docker-cache-image }} \
+          .
+
+        # --build-arg BUILDKIT_INLINE_CACHE=1 \
+
+  push_multiarch_tag:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Extract names
+      id: extract
+      run: |
+        set -eu
+        BRANCH="$(echo ${{ github.ref }} | sed -r 's/refs\/heads\/(.*)/\1/')"
+        PARENT_BRANCH="$(echo $BRANCH | sed -r 's/(.*)-arm/\1/')"
+        ARCH_SNAKECASE="$(echo '${{ matrix.arch }}' | sed -r 's/\//_/g')"
+
+        DOCKER_TAG="$PARENT_BRANCH-$ARCH_SNAKECASE"
+        DOCKER_CACHE_REPO="${{ github.repository }}"
+        DOKCER_CACHE_TAG="$PARENT_BRANCH"
+        DOCKER_CACHE_IMAGE="$DOCKER_CACHE_REPO:$DOKCER_CACHE_TAG"
+        DOCKER_PUSH_IMAGE="${{ github.repository }}:$PARENT_BRANCH"
+        # 安定版をlatestとした方が良さそう
+        # if [ $PARENT_BRANCH = "master" ];then
+        #   DOCKER_TAG=latest
+        # fi
+
+        DOCKER_CACHE_PATH=${PWD}/.docker-build-cache
+
+        echo "##[set-output name=branch;]$BRANCH"
+        echo "##[set-output name=arch-snakecase;]$ARCH_SNAKECASE"
+        echo "##[set-output name=docker-tag;]$DOCKER_TAG"
+        echo "##[set-output name=docker-cache-repo;]$DOCKER_CACHE_REPO"
+        echo "##[set-output name=docker-cache-tag;]$DOKCER_CACHE_TAG"
+        echo "##[set-output name=docker-cache-image;]$DOCKER_CACHE_IMAGE"
+        echo "##[set-output name=docker-cache-path;]$DOCKER_CACHE_PATH"
+        echo "##[set-output name=docker-push-image;]$DOCKER_PUSH_IMAGE"
+
+    - name: Set up Docker Buildx
+      uses: crazy-max/ghaction-docker-buildx@v1
+      with:
+        version: latest
+
+    - name: Login to Docker Hub
+      run: |
+        set -eux
+        docker login -u satackey -p ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Create multiarch tag
+      run: |
+        set -eux
+        PUSH_IMAGE='${{ steps.extract.outputs.docker-push-image }}'
+        CACHED_IMAGE='${{ steps.extract.outputs.docker-cache-image }}'
+
+        docker buildx imagetools create -t $PUSH_IMAGE \
+          $CACHED_IMAGE-linux_amd64 \
+          $CACHED_IMAGE-linux_arm_v7 \
+          $CACHED_IMAGE-linux_arm64
