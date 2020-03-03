@@ -16,7 +16,7 @@
 set -e
 
 VERSION="1.25.4"
-IMAGE="satackey/docker-compose:$VERSION
+IMAGE="docker/compose:$VERSION"
 
 
 # Setup options for connecting to docker host
